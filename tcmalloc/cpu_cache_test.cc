@@ -162,6 +162,8 @@ TEST(CpuCacheTest, Metadata) {
   for (int i = 0; i < num_cpus; i++) {
     cache.Reclaim(i);
   }
+
+  
 }
 
 }  // namespace

@@ -19,6 +19,7 @@
 #include <stdint.h>
 
 #include <atomic>
+#include <vector>
 
 #include "absl/base/attributes.h"
 #include "absl/base/call_once.h"
@@ -87,6 +88,9 @@ class CPUCache {
   // unused, this will eliminate stranded memory.)  Returns the number
   // of bytes we sent back.  This function is thread safe.
   uint64_t Reclaim(int cpu);
+
+  // GetCacheMemory is used to expose the GetHugePageInfo in the percpu_tcmalloc.h to outside scope.
+  size_t GetCacheMemory(int cpu);
 
   // Determine number of bits we should use for allocating per-cpu cache
   // The amount of per-cpu cache is 2 ^ kPerCpuShift
@@ -200,14 +204,19 @@ inline void *ABSL_ATTRIBUTE_ALWAYS_INLINE CPUCache::Allocate(size_t cl) {
       // report miss instead.
       tracking::Report(kMallocHit, cl, -1);
       tracking::Report(kMallocMiss, cl, 1);
-      void *ret = Static::cpu_cache()->Refill(cpu, cl);
+      void *ret = Static::cpu_cache()->Refill(cpu, cl);  
       if (ABSL_PREDICT_FALSE(ret == nullptr)) {
         size_t size = Static::sizemap()->class_to_size(cl);
-        return OOMHandler(size);
+        //Log(kLog, __FILE__, __LINE__, "Going into OOM handler", 0, 0, cl);
+        void * returnval = OOMHandler(size);
+        if(returnval == nullptr) Log(kLog, __FILE__, __LINE__, "Returning null", 0, 0, cl);
+        return returnval;
       }
+      //Log(kLog, __FILE__, __LINE__, "Underflow code", 0, 0, cl);
       return ret;
     }
   };
+  //Log(kLog, __FILE__, __LINE__, "CPU cache allocate", 0, 0, cl);  
   return freelist_.Pop(cl, &Helper::Underflow);
 }
 
@@ -222,6 +231,7 @@ inline void ABSL_ATTRIBUTE_ALWAYS_INLINE CPUCache::Deallocate(void *ptr,
       // Fix that.
       tracking::Report(kFreeHit, cl, -1);
       tracking::Report(kFreeMiss, cl, 1);
+      //Log(kLog, __FILE__, __LINE__, "Running the overflow part", 0, 0, cl);  
       return Static::cpu_cache()->Overflow(ptr, cl, cpu);
     }
   };

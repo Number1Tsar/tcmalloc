@@ -373,7 +373,7 @@ class SizeMap {
                                                         uint32_t* cl) {
     ASSERT(align > 0);
     ASSERT((align & (align - 1)) == 0);
-
+    //Log(kLog, __FILE__, __LINE__, "Malloc mode", TCMALLOC_PAGE_SHIFT, kMaxSize, *cl); 
     if (ABSL_PREDICT_FALSE(align >= kPageSize)) {
       return false;
     }

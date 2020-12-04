@@ -504,6 +504,10 @@ uint64_t CPUCache::CacheLimit() const {
   return Parameters::max_per_cpu_cache_size();
 }
 
+size_t CPUCache::GetCacheMemory(int cpu) {
+  return freelist_.GetHugePageInfo(cpu);
+}
+
 struct DrainContext {
   std::atomic<size_t> *available;
   uint64_t bytes;

@@ -69,6 +69,12 @@
 #include <tuple>
 #include <utility>
 #include <vector>
+#include <set>
+
+
+#include <thread>
+#include <chrono>
+#include <fstream>
 
 #include "absl/base/attributes.h"
 #include "absl/base/config.h"
@@ -111,6 +117,8 @@
 #include "tcmalloc/tracking.h"
 #include "tcmalloc/transfer_cache.h"
 
+#include "tcmalloc/huge_pages.h"
+
 #if defined(OS_FREEBSD) || defined(OS_MACOSX)
 #undef HAVE_STRUCT_MALLINFO
 #else
@@ -137,10 +145,65 @@ using tcmalloc::StackTraceTable;
 using tcmalloc::Static;
 using tcmalloc::ThreadCache;
 
+//Stat Tracker is a singleton class which can be used to periodically get tcmalloc stat information
+// It spins up a std::thread and runs background task which periodically dumps the malloc stats into
+// a file.
+struct StatTracker
+{
+private:
+  static StatTracker* trackerInstance;
+  static std::string FILEPATH;
+  std::thread t;
+  static int fileCounter;
+  const uint64_t INTERVAL = 5U;
+
+  static void backgroundTask()
+  {
+    while(true)
+    {
+      //getStats and dump to file.
+      std::string fileName = FILEPATH + std::to_string(fileCounter)+".txt";
+      Log(kLog, __FILE__, __LINE__, "Generating Stats"); 
+      std::ofstream file;
+      file.open(fileName);
+      std::string output =  tcmalloc::MallocExtension::GetStats();
+      file<<output;
+      file.close();
+      fileCounter++;
+      std::this_thread::sleep_for(std::chrono::seconds(INTERVAL));
+    }
+  }
+
+  StatTracker()
+  {
+    t = std::thread(backgroundTask);
+  }
+
+public:
+
+  static StatTracker* getInstace()
+  {
+    if(!trackerInstance) trackerInstance = new StatTracker();
+    return trackerInstance;
+  }
+
+  ~StatTracker()
+  {
+
+  }
+};
+
+
+//TODO : add timestamp to fileNames.
+StatTracker* StatTracker::trackerInstance = nullptr;
+std::string StatTracker::FILEPATH = "./output";
+int StatTracker::fileCounter = 0;
+
 // ----------------------- IMPLEMENTATION -------------------------------
 
 // Extract interesting stats
 struct TCMallocStats {
+  size_t hugePageUsed;              // Number of HugePages found in CPU cache
   uint64_t thread_bytes;            // Bytes in thread caches
   uint64_t central_bytes;           // Bytes in central cache
   uint64_t transfer_bytes;          // Bytes in central transfer cache
@@ -191,6 +254,8 @@ static void ExtractStats(TCMallocStats* r, uint64_t* class_count,
     }
   }
 
+  
+
   // Add stats from per-thread heaps
   r->thread_bytes = 0;
   { // scope
@@ -203,6 +268,7 @@ static void ExtractStats(TCMallocStats* r, uint64_t* class_count,
     r->metadata_bytes = Static::metadata_bytes();
     r->pagemap_bytes = Static::pagemap()->bytes();
     r->pageheap = Static::page_allocator()->stats();
+    r->hugePageUsed = Static::cpu_cache()->GetCacheMemory(0);
     if (small_spans != nullptr) {
       Static::page_allocator()->GetSmallSpanStats(small_spans);
     }
@@ -327,7 +393,8 @@ static void DumpStats(TCMalloc_Printer* out, int level) {
       "MALLOC:   %12" PRIu64 " (%7.1f MiB) per-CPU slab bytes used\n"
       "MALLOC:   %12" PRIu64 " (%7.1f MiB) per-CPU slab resident bytes\n"
       "MALLOC:   %12" PRIu64 "               Tcmalloc page size\n"
-      "MALLOC:   %12" PRIu64 "               Tcmalloc hugepage size\n",
+      "MALLOC:   %12" PRIu64 "               Tcmalloc hugepage size\n"
+      "MALLOC:   %12" PRIu64 " Huge Pages used\n",
       bytes_in_use_by_app, bytes_in_use_by_app / MiB,
       stats.pageheap.free_bytes, stats.pageheap.free_bytes / MiB,
       stats.central_bytes, stats.central_bytes / MiB,
@@ -357,7 +424,8 @@ static void DumpStats(TCMalloc_Printer* out, int level) {
       stats.percpu_metadata_bytes / MiB,
       stats.percpu_metadata_bytes_res, stats.percpu_metadata_bytes_res / MiB,
       uint64_t(kPageSize),
-      uint64_t(tcmalloc::kHugePageSize));
+      uint64_t(tcmalloc::kHugePageSize),
+      uint64_t(stats.hugePageUsed));
   // clang-format on
 
   tcmalloc::PrintExperiments(out);
@@ -1479,7 +1547,7 @@ inline void* do_malloc_pages(size_t size, size_t alignment) {
   if (span == nullptr) {
     return nullptr;
   }
-
+  
   void* result = span->start_address();
 
   if (size_t weight = ShouldSampleAllocation(size)) {
@@ -1517,6 +1585,7 @@ inline void* ABSL_ATTRIBUTE_ALWAYS_INLINE AllocSmall(Policy policy, size_t cl,
                                nullptr, capacity);
   }
   SetClassCapacity(cl, capacity);
+  //Log(kLog, __FILE__, __LINE__, "small allocation here", 0, size, cl); 
   return result;
 }
 
@@ -1594,6 +1663,9 @@ inline ABSL_ATTRIBUTE_ALWAYS_INLINE void do_free_with_cl(void* ptr, size_t cl) {
   ASSERT(have_cl || cl == 0);
 
   const PageId p = PageIdContaining(ptr);
+  //checking for huge page
+  // tcmalloc::HugePage h = tcmalloc::HugePageContaining(p);
+  // Log(kLog, __FILE__, __LINE__, "Hugepage", ptr, h.start_addr, cl);
 
   // if we have_cl, then we've excluded ptr == nullptr case. See
   // comment in do_free_with_size. Thus we only bother testing nullptr
@@ -1777,9 +1849,11 @@ static void* ABSL_ATTRIBUTE_SECTION(google_malloc)
   void* p;
   uint32_t cl;
   bool is_small = Static::sizemap()->GetSizeClass(size, policy.align(), &cl);
+  //Log(kLog, __FILE__, __LINE__, "size class is", 0, size, cl);  
   if (ABSL_PREDICT_TRUE(is_small)) {
     p = AllocSmall(policy, cl, size, capacity);
   } else {
+    //Log(kLog, __FILE__, __LINE__, "This one is large", 0, size, cl); 
     p = do_malloc_pages(size, policy.align());
     // Set capacity to the exact size for a page allocation.
     // This needs to be revisited if we introduce gwp-asan
@@ -1805,6 +1879,7 @@ fast_alloc(Policy policy, size_t size, CapacityPtr capacity = nullptr) {
   uint32_t cl;
   bool is_small = Static::sizemap()->GetSizeClass(size, policy.align(), &cl);
   if (ABSL_PREDICT_FALSE(!is_small)) {
+    //Log(kLog, __FILE__, __LINE__, "Going into large mode", 0, size, cl); 
     return slow_alloc(policy, size, capacity);
   }
 
@@ -1836,6 +1911,7 @@ fast_alloc(Policy policy, size_t size, CapacityPtr capacity = nullptr) {
   void* ret;
 #ifndef TCMALLOC_DEPRECATED_PERTHREAD
   // The CPU cache should be ready.
+  //Log(kLog, __FILE__, __LINE__, "Going here into cpu allocation", 0, size, cl); 
   ret = Static::cpu_cache()->Allocate<Policy::handle_oom>(cl);
 #else  // !defined(TCMALLOC_DEPRECATED_PERTHREAD)
   // The ThreadCache should be ready.
@@ -2196,6 +2272,8 @@ extern "C" void TCMallocInternalDeleteArrayAligned_nothrow(
 #endif
 
 extern "C" void* TCMallocInternalMemalign(size_t align, size_t size) noexcept {
+  //Start a singleton thread;
+  //auto st = StatTracker::getInstace();
   ASSERT(align != 0);
   ASSERT((align & (align - 1)) == 0);
   return fast_alloc(MallocPolicy().AlignAs(align), size);

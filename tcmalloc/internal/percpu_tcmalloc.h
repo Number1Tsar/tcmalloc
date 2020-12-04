@@ -19,11 +19,15 @@
 
 #include <atomic>
 #include <cstring>
+#include <vector>
+#include <set>
 
 #include "absl/base/dynamic_annotations.h"
 #include "absl/base/internal/sysinfo.h"
 #include "tcmalloc/internal/mincore.h"
 #include "tcmalloc/internal/percpu.h"
+#include "tcmalloc/internal/logging.h"
+
 
 #if defined(PERCPU_USE_RSEQ)
 #if !defined(__clang__)
@@ -141,6 +145,10 @@ class TcmallocSlab {
 
   PerCPUMetadataState MetadataMemoryUsage() const;
 
+  // GetHugePageInfo is used to scan through all CPU slabs and determine what fraction of objects residing 
+  // in the cache correspond to location from HugePages.
+  size_t GetHugePageInfo(int cpu);
+
   // We use a single continuous region of memory for all slabs on all CPUs.
   // This region is split into NumCPUs regions of size kPerCpuMem (256k).
   // First NumClasses words of each CPU region are occupied by slab
@@ -176,6 +184,8 @@ class TcmallocSlab {
 
   Slabs* slabs_;
 
+
+  //get slab for cpu
   Slabs* CpuMemoryStart(int cpu) const;
   std::atomic<int64_t>* GetHeader(int cpu, size_t cl) const;
   static Header LoadHeader(std::atomic<int64_t>* hdrp);
@@ -183,6 +193,44 @@ class TcmallocSlab {
   static int CompareAndSwapHeader(int cpu, std::atomic<int64_t>* hdrp,
                                   Header old, Header hdr);
 };
+
+template <size_t Shift, size_t NumClasses>
+inline size_t TcmallocSlab<Shift, NumClasses>::GetHugePageInfo(int cpu){
+  //for every class size
+  std::vector<void*> locations;
+  std::set<uint64_t> hugePagesFound;
+  for (int cpu = 0, num_cpus = absl::base_internal::NumCPUs(); cpu < num_cpus;++cpu)
+  {
+    int totalObjects = 0;
+    Slabs* slab = &slabs_[cpu];
+    for(size_t cl=0; cl < NumClasses; ++cl)
+    { 
+    //Log(kLog, __FILE__, __LINE__, "Getting CPU cache begins", cpu, cl, value);
+    Header header = LoadHeader(GetHeader(cpu, cl));
+      //Log(kLog, __FILE__, __LINE__, "Getting CPU cache stats", cpu, cl, 0);
+    uint16_t start = header.begin;
+    uint16_t end = header.current;
+    // Log(kLog, __FILE__, __LINE__, "Memory location starts", cpu, slab->mem + start);
+    // Log(kLog, __FILE__, __LINE__, "Memory location current", cpu, slab->mem + end);
+    for(int ptr = start; ptr < end; ptr++)
+    {
+      auto memory = (slab->mem + ptr);
+      totalObjects++;
+      //auto memory = reinterpret_cast<uint64_t*> (slabs_->mem + ptr);
+      Log(kLog, __FILE__, __LINE__, "Memory location", cpu, cl, memory);
+      auto pageAllign =  reinterpret_cast<uintptr_t>(memory) >> kPageShift;
+      auto hugePageAllign = (pageAllign >> (kHugePageShift - kPageShift));
+      Log(kLog, __FILE__, __LINE__, "HugePage location", cpu, cl, hugePageAllign);
+      uint64_t hNumber = reinterpret_cast<uint64_t>(hugePageAllign);
+      uint64_t pNumber = reinterpret_cast<uint64_t>(pageAllign);
+      hugePagesFound.insert(hNumber);
+    }
+  }
+  //Log(kLog, __FILE__, __LINE__, "total objects in CPU",cpu, totalObjects);
+  }
+  //Log(kLog, __FILE__, __LINE__, "HugePages Found", hugePagesFound.size());
+  return hugePagesFound.size();
+}
 
 template <size_t Shift, size_t NumClasses>
 inline size_t TcmallocSlab<Shift, NumClasses>::Length(int cpu,
@@ -382,6 +430,7 @@ static inline ABSL_ATTRIBUTE_ALWAYS_INLINE void* TcmallocSlab_Pop(
 #ifdef PERCPU_USE_RSEQ_ASM_GOTO_OUTPUT
   asm goto
 #else
+//Log(kLog, __FILE__, __LINE__, "PER CPU Reseq mode", 0, 0, cl);
   bool underflow;
   asm
 #endif

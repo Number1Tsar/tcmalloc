@@ -66,7 +66,7 @@ bool decide_want_hpaa() {
 
 bool want_hpaa() {
   static bool use = decide_want_hpaa();
-
+  
   return use;
 }
 
