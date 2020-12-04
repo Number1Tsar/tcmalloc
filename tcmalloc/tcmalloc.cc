@@ -155,7 +155,7 @@ private:
   static std::string FILEPATH;
   std::thread t;
   static int fileCounter;
-  const uint64_t INTERVAL = 5U;
+  static uint64_t INTERVAL;
 
   static void backgroundTask()
   {
@@ -198,6 +198,7 @@ public:
 StatTracker* StatTracker::trackerInstance = nullptr;
 std::string StatTracker::FILEPATH = "./output";
 int StatTracker::fileCounter = 0;
+uint64_t StatTracker::INTERVAL = 5;
 
 // ----------------------- IMPLEMENTATION -------------------------------
 
